@@ -1,0 +1,229 @@
+Windows 11 VFIO + Looking Glass — detailed status (2026-09-04 evening)
+======================================================================
+
+Cross-links
+-----------
+• GitHub project:      ~/Documents/GitHub/WlfRyt-Win11-VFIO-LookingGlass/
+• Full runbook:        .../README.md  (also /data/vms/win11/README.md → same)
+• This status card:    .../STATUS.txt (Desktop: ~/Desktop/win11-vm-STATUS.txt → same)
+• Desktop runbook link:~/Desktop/win11-vm-README.md → README.md in this folder
+• Looking Glass app:   ~/Desktop/looking-glass-client.desktop
+
+Hardware roles
+--------------
+Host OS:     CachyOS on Samsung 1TB NVMe (nvme0n1, Btrfs subvol=/@)
+Host GPU:    AMD Radeon 610M (desktop / compositor)
+Guest GPU:   NVIDIA RTX 5060 Max-Q [10de:2d19] on vfio-pci (GPU-only; no 01:00.1)
+Data SSD:    Sabrent Rocket Q4 2TB (nvme1n1) mounted at /data  (~1.3T free)
+Guest disk:  /data/vms/win11/win11.qcow2  (ALREADY on the 2TB SSD)
+
+Where we are now
+----------------
+WORKING gaming VM — Windows 11 via Looking Glass IDD on the RTX 5060
+(near bare-metal feel). Domain usually left running after evening work.
+
+Daily start
+-----------
+  sudo virsh start win11
+  looking-glass-client          # Right Ctrl releases input
+  # Prefer Looking Glass over spicy; black SPICE is often expected with IDD-only
+
+Hard rules (do not break)
+-------------------------
+• Never live-unbind NVIDIA HDMI audio 01:00.1 (D-state host hang)
+• Boot Limine → CachyOS (subvol=/@), not Snapshots
+• Keep /data/vms/win11/ENABLE_GPU_PASSTHROUGH marker
+• NVIDIA stays on vfio after VM stop (boot-bound by design)
+• Test GTA Online only on a SECONDARY Rockstar account first
+
+======================================================================
+EVENING SESSION LOG — 2026-09-04 (extra hardening + disk + checks)
+======================================================================
+
+A) BattlEye / anti-detect hardening (host XML)
+---------------------------------------------
+Goal: reduce easy VM fingerprints for BattlEye titles (GTA V Online etc.).
+Honest limit: NOT guaranteed. Kernel AC updates; Rockstar ToS still apply.
+
+Already present before evening:
+  • SMBIOS sysinfo = this HP OMEN (AMI F.13 / board 8E35 / serials matched)
+  • NIC MAC ac:f4:66:28:f0:3d  (host wired OUI+1; NOT QEMU 52:54:00)
+  • kvm hidden + hypervisor CPUID off + Hyper-V vendor_id=AuthenticAMD
+  • Expanded Hyper-V enlightenments, ioapic=kvm, pmu on
+  • Fake battery ACPI SSDT OEM HPQOEM/BATTERY
+  • GPU-only VFIO (no 01:00.1 in guest)
+  • Looking Glass IDD B7-826 on NVIDIA
+  • QXL kept for recovery console
+
+Applied evening (inactive XML → define → restart):
+  1. System disk VirtIO-blk → SATA/AHCI  (target sda, ide-hd backend)
+  2. memballoon model='none'  (was still virtio despite earlier note)
+  3. USB tablet input removed  (PS/2 + Looking Glass input remain)
+  4. CPU migratable='off'
+  5. Later: qemu:override on alias sata0-0-0 to spoof ATA identity:
+       model = SAMSUNG MZVL21T0HCLR
+       ver   = GXA75H0Q
+       serial= S6XNNS0W20260904A
+     (Windows previously saw Model=QEMU HARDDISK — loud tell)
+
+XML backups under /data/vms/win11/:
+  win11-pre-harden-202609041801.xml
+  win11-inactive-pre-harden-202609041801.xml
+  win11-hardened-202609041801.xml
+  win11-live-post-harden-202609041811.xml
+  win11-before-diskmodel-202609041840.xml
+  win11-diskmodel-202609041840.xml
+
+Note: soft `virsh shutdown` / HMP powerdown was ignored by Windows once;
+`virsh destroy` used for required restarts. Prefer Shutdown inside Windows
+when possible.
+
+B) Disk capacity — no physical move needed
+------------------------------------------
+User asked to move VM to 2TB SSD for more Windows space.
+Finding: qcow2 was ALREADY on /data (Sabrent 2TB). Bottleneck was virtual
+size 256 GiB, not host placement.
+
+Actions:
+  • qemu-img resize /data/vms/win11/win11.qcow2 1T
+  • Virtual size now 1 TiB; host sparse usage still ~42–47 GiB until Windows fills it
+  • /data still ~1.3T free
+
+C) Windows partition extend (guest)
+-----------------------------------
+After resize, Disk Management showed Extend greyed out because layout was:
+
+  EFI/System → MSR → C: (~255GB) → Recovery (~730–854MB) → Unallocated (~768GB)
+
+Recovery sat BETWEEN C: and free space, so Extend was blocked.
+
+Guest fix performed:
+  1. reagentc /disable  (reported already disabled)
+  2. diskpart: select disk 0 → select partition 4 (Recovery ~854MB)
+     → gpt attributes cleared if needed → delete partition override
+     IMPORTANT: Partition 3 was C: (Primary ~254GB). Deleting 3 fails with
+     “boot/system/pagefile…” — that error meant wrong partition selected.
+  3. Extended C: into free space — SUCCESS
+
+WinRE recovery partition is gone; fine for gaming VM. Optional later:
+recreate small Recovery at end of disk + reagentc /enable.
+
+D) In-guest BattlEye verification results
+-----------------------------------------
+PASS — identity / anti-detect basics:
+  Manufacturer/Model : HP / OMEN Gaming Laptop 16-ap0xxx
+  BIOS               : AMI F.13, serial 1H85430PWY
+  Baseboard          : HP 8E35 / PVAJT0387LJ2Z6
+  MAC                : AC-F4-66-28-F0-3D (Intel 82574L / e1000e)
+  HypervisorPresent  : False
+  NVIDIA RTX 5060    : OK (driver present)
+  Looking Glass IDD  : OK
+  Disk bus           : SATA/IDE (not VirtIO) after controller change
+  systeminfo         : System Manufacturer HP / Model OMEN (good)
+
+WAS noisy before disk-model spoof:
+  Win32_DiskDrive.Model = QEMU HARDDISK   ← fixed in QEMU cmdline via override
+  Re-check after latest boot:
+    Get-CimInstance Win32_DiskDrive | Select Model, SerialNumber, InterfaceType, FirmwareRevision
+    Expect: SAMSUNG MZVL21T0HCLR (not QEMU HARDDISK)
+
+Still present / residual risk (expected or leftover):
+  ACTIVE / needed for current stack:
+    • Looking Glass IDD + IVSHMEM device
+    • Red Hat QXL controller (recovery SPICE framebuffer)
+    • VirtIO Serial + SPICE vdagent channel (clipboard)
+    • QEMU FwCfg
+    • swtpm emulated TPM (not host fTPM passthrough)
+  GHOST / Unknown (safe to uninstall hidden devices in Device Manager):
+    • VirtIO Balloon Driver (Unknown) — balloon removed from XML
+    • Red Hat VirtIO Ethernet / SCSI disk / SCSI controller (Unknown)
+    • Old QEMU DVD-ROM entries (Unknown)
+
+E) What to do next
+------------------
+1. Confirm disk model string in guest after latest restart (Samsung, not QEMU)
+2. Device Manager → View → Show hidden devices → uninstall dead VirtIO/QEMU ghosts
+3. Confirm Looking Glass IDD log still: Selected render adapter NVIDIA RTX 5060
+4. Test GTA V / GTA Online on SECONDARY Rockstar account only
+5. If BattlEye still kicks: strip more SPICE/virtio-serial, consider TPM passthrough,
+   or bare-metal dual-boot for Online
+
+Guest PowerShell quick re-check
+-------------------------------
+  Get-CimInstance Win32_ComputerSystem | Select Manufacturer, Model
+  Get-CimInstance Win32_BIOS | Select Manufacturer, SMBIOSBIOSVersion, SerialNumber
+  Get-CimInstance Win32_DiskDrive | Select Model, SerialNumber, InterfaceType, FirmwareRevision
+  getmac /v
+  (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
+  Get-CimInstance Win32_VideoController | Select Name, Status
+
+Key paths
+---------
+  /data/vms/win11/win11.qcow2
+  /data/vms/win11/ENABLE_GPU_PASSTHROUGH
+  /data/vms/win11/acpi/SSDT1.dat
+  /data/vms/win11/README.md
+  /etc/modprobe.d/vfio-nvidia-passthrough.conf
+  ~/.looking-glass-client.ini
+  /dev/shm/looking-glass
+
+======================================================================
+LATER NOTES — network speed + Looking Glass window (same day)
+======================================================================
+
+F) Network performance (measured / discussed; NO NIC change made)
+----------------------------------------------------------------
+Current guest path:
+  • NIC model: e1000e (Intel 82574L lookalike)
+  • Mode: libvirt NAT → network 'default' / virbr0
+  • MAC kept: ac:f4:66:28:f0:3d
+  • Guest DHCP lease seen as 192.168.122.29 (Win11VM)
+  • Host uplink: WiFi wlan0 (eno1 ethernet down during checks)
+  • No libvirt <bandwidth> cap on the NIC
+
+Findings:
+  • Host WiFi PHY looked excellent (~2.4 / 1.9 Gbps link, ~-47 dBm).
+  • One public 100MB download sample on host was only ~118 Mbps — that
+    sample was server-limited, NOT the real host ceiling.
+  • User reports host can reach upwards of ~1.5 Gbps.
+  • Therefore the Windows VM is likely leaving speed on the table:
+      e1000e is emulated ~1 GbE and usually cannot approach multi-gig.
+  • NAT adds some overhead, but e1000e is the main guest-side ceiling.
+  • QEMU guest agent is NOT configured, so in-guest speed tests must be
+    run manually inside Windows.
+
+BattlEye vs speed (decision recorded):
+  • Keep e1000e for now if GTA Online / BattlEye still matters.
+  • VirtIO NIC = biggest guest speed win, but higher BattlEye risk
+    (Red Hat VirtIO Ethernet fingerprint — same class of tell removed
+    from the system disk).
+  • Host Ethernet alone helps WiFi flakiness; it does NOT remove the
+    e1000e guest cap.
+  • NO network XML change was applied after this discussion.
+
+If chasing speed later (accept BattlEye risk):
+  1. Backup XML
+  2. Change interface model e1000e → virtio (optionally vhost)
+  3. Ensure VirtIO net drivers present in guest
+  4. Easy rollback to e1000e + same MAC
+
+G) Looking Glass viewer window (UI only; config left unchanged)
+--------------------------------------------------------------
+Client config (~/.looking-glass-client.ini) intentionally LEFT AS-IS:
+  fullScreen=yes, borderless=yes, showFPS=yes, escapeKey=Right Ctrl
+
+To minimize the Looking Glass window without changing config:
+  1. Press Right Ctrl (releases input / opens LG menu)
+  2. Turn fullscreen OFF
+  3. Minimize like a normal window (Super+Down / titlebar / taskbar)
+
+Optional later (NOT applied): start windowed with fullScreen=no,
+borderless=no, size=1280x720, showFPS=no; or minimizeOnFocusLoss=yes.
+
+H) Decisions locked for now
+---------------------------
+  • Looking Glass client stays fullscreen/borderless.
+  • Guest NIC stays e1000e + NAT (BattlEye-safer than VirtIO).
+  • Do not chase multi-gig in-guest until accepting VirtIO risk.
+  • Still open: confirm Samsung disk model string; clean ghost VirtIO
+    devices; GTA Online secondary-account test.

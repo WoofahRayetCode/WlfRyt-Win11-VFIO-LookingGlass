@@ -1,0 +1,5 @@
+# Docs-only repo. Never add guest disks or binary VM state.
+*.qcow2
+*.raw
+*.img
+*.nvram
